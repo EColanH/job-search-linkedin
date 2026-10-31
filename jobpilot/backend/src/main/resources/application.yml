@@ -1,0 +1,42 @@
+server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
+  port: 8080
+  error:
+    include-message: never
+spring:
+  application:
+    name: jobpilot
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/jobpilot}
+    username: ${POSTGRES_USER:jobpilot}
+    password: ${POSTGRES_PASSWORD:jobpilot_local}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 11MB
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+  task:
+    execution:
+      pool:
+        core-size: 2
+        max-size: 2
+        queue-capacity: 20
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+jobpilot:
+  worker-url: ${DOCUMENT_WORKER_URL:http://127.0.0.1:8000}
+  ollama-url: ${OLLAMA_BASE_URL:http://127.0.0.1:11434}
+
+logging:
+  structured:
+    format:
+      console: ecs
