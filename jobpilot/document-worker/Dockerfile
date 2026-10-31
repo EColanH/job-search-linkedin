@@ -12,7 +12,7 @@ RUN --mount=type=secret,id=proxy_ca,required=false \
     if [ -f /run/secrets/proxy_ca ]; then export PIP_CERT=/run/secrets/proxy_ca; fi; \
     pip install --no-cache-dir -r requirements.txt
 COPY app.py .
-RUN useradd --uid 10001 --create-home worker && mkdir -p /data && chown worker:worker /data
+RUN useradd --uid 10001 --create-home worker && mkdir -p /data && chown worker:worker /data && chmod 0644 /app/app.py
 USER worker
 ENV DOCUMENT_STORAGE=/data
 EXPOSE 8000
