@@ -1,78 +1,1005 @@
 package dev.jobpilot;
+
 import dev.jobpilot.ai.MatchingService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.http.*;
-import org.springframework.web.multipart.MultipartFile;
-import java.util.*;
 import java.time.*;
-import java.math.BigDecimal;
-@RestController @RequestMapping("/api")
+import java.util.*;
+import org.springframework.http.*;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+@RestController
+@RequestMapping("/api")
 public class Api {
- private final Store store; private final LinkedIn linkedin;private final Tasks tasks;private final Worker worker;private final MatchingService matching;private final com.fasterxml.jackson.databind.ObjectMapper mapper;
- Api(Store store,LinkedIn linkedin,Tasks tasks,Worker worker,MatchingService matching,com.fasterxml.jackson.databind.ObjectMapper mapper){this.store=store;this.linkedin=linkedin;this.tasks=tasks;this.worker=worker;this.matching=matching;this.mapper=mapper;}
- private Map<String,Object> singleton(String kind,java.util.function.Supplier<Map<String,Object>> defaults){try{return store.get(kind,kind+"-current");}catch(ApiError e){return store.put(kind,kind+"-current",defaults.get());}}
- @GetMapping("/candidates/current") public Map<String,Object> candidate(){return singleton("candidate",Defaults::candidate);}
- @PutMapping("/candidates/current") public Map<String,Object> candidate(@Valid @RequestBody dev.jobpilot.dto.CandidateUpdate request){Map<String,Object> input=mapper.convertValue(request,new com.fasterxml.jackson.core.type.TypeReference<Map<String,Object>>(){});var c=new LinkedHashMap<>(candidate());String name=Input.text(input,"name");if(name.length()>200)throw new ApiError(400,"Name is too long");c.put("name",name);c.put("summary",Input.text(input,"summary"));var facts=Input.maps(input.get("verifiedFacts"));Set<String> ids=new HashSet<>();for(var f:facts){String id=Input.text(f,"id");if(id.isBlank())f.put("id",UUID.randomUUID().toString());if(!ids.add(Input.text(f,"id")))throw new ApiError(400,"Fact IDs must be unique");Input.required(f,"section",100);Input.required(f,"text",5000);}if(facts.size()>150)throw new ApiError(400,"At most 150 verified facts are supported");c.putAll(Input.fields(input,"careerGoals","location","workArrangements","preferredSalary"));c.put("verifiedFacts",facts);if(input.containsKey("pendingFacts"))c.put("pendingFacts",Input.maps(input.get("pendingFacts")));return store.put("candidate","candidate-current",c);}
- @PostMapping(value="/candidates/cv",consumes=MediaType.MULTIPART_FORM_DATA_VALUE) public Map<String,Object> upload(@RequestPart("file")MultipartFile file){var parsed=worker.parse(file);var c=new LinkedHashMap<>(candidate());var pending=Input.maps(c.get("pendingFacts"));pending.addAll(Input.maps(parsed.get("pendingFacts")));c.put("pendingFacts",pending);var docs=Input.maps(c.get("documents"));docs.add(Input.fields(parsed,"documentId","originalName","warnings"));c.put("documents",docs);c.put("lastExtractedText",parsed.get("text"));return store.put("candidate","candidate-current",c);}
- @GetMapping("/candidates/documents/{id}/download") public ResponseEntity<byte[]> original(@PathVariable String id){boolean owned=Input.maps(candidate().get("documents")).stream().anyMatch(d->id.equals(d.get("documentId")));if(!owned)throw new ApiError(404,"Document not found");return attachment(worker.download(id,"original"),"application/octet-stream","original-cv");}
- @DeleteMapping("/candidates/current") public Map<String,Object> deleteCandidate(@RequestParam(defaultValue="false")boolean confirm){if(!confirm)throw new ApiError(400,"confirm=true is required to delete all local candidate and job data");tasks.withoutActiveTasks(()->{worker.deleteAll();store.deleteAll();});return Map.of("deleted",true);}
- @GetMapping("/settings") public Map<String,Object> settings(){return singleton("settings",Defaults::settings);}
- @PutMapping("/settings") public Map<String,Object> settings(@RequestBody Map<String,Object> input){var current=new LinkedHashMap<>(settings());if(input.containsKey("ai")){var ai=new LinkedHashMap<>(Input.map(input.get("ai")));String provider=Input.text(ai,"provider").toUpperCase(Locale.ROOT).replace('_','-');if(!Set.of("OLLAMA","OPENAI_COMPATIBLE","OPENAI-COMPATIBLE","DISABLED").contains(provider))throw new ApiError(400,"Unsupported AI provider");Input.required(ai,"model",150);double temp=Input.num(ai.get("temperature"),.2);if(temp<0||temp>1)throw new ApiError(400,"Temperature must be 0 to 1");if(provider.startsWith("OPENAI")&&!Input.bool(ai,"externalConsent"))throw new ApiError(400,"Explicit external AI consent is required");ai.put("provider",provider);current.put("ai",Input.fields(ai,"provider","model","temperature","externalConsent","maxTokens"));}if(input.containsKey("matchingWeights")){var weights=Input.map(input.get("matchingWeights"));double sum=0;for(String key:List.of("experience","skills","seniority","growth","location")){double w=Input.num(weights.get(key),-1);if(w<0||w>100||w!=Math.rint(w))throw new ApiError(400,"Each matching weight must be 0 to 100");sum+=w;}if(Math.abs(sum-100)>.01)throw new ApiError(400,"Matching weights must sum to 100");current.put("matchingWeights",weights);}return store.put("settings","settings-current",current);}
- @GetMapping("/search-preferences") public Map<String,Object> preferences(){return singleton("preferences",Defaults::preferences);}
- @PutMapping("/search-preferences") public Map<String,Object> preferences(@RequestBody Map<String,Object> input){var p=new LinkedHashMap<>(preferences());p.putAll(Input.fields(input,"titles","city","country","workArrangements","publicationDays","keywords","excludedCompanies","excludedKeywords","companies","industries","seniority","employmentTypes","minMatchScore","salaryFilterEnabled","preferredSalary","salaryMin","salaryMax","currency","salaryPeriod","includeUndisclosedSalaries"));p.put("scheduleEnabled",false);for(var t:Input.maps(p.get("titles")))Input.required(t,"title",200);double min=Input.num(p.get("salaryMin"),0),max=Input.num(p.get("salaryMax"),Double.MAX_VALUE);if(min<0||max<min)throw new ApiError(400,"Invalid salary range");if(!Input.text(p,"currency").matches("[A-Z]{3}"))throw new ApiError(400,"Currency must be a three-letter code");if(!Set.of("MONTHLY","YEARLY","HOURLY").contains(p.get("salaryPeriod")))throw new ApiError(400,"Invalid salary period");double score=Input.num(p.get("minMatchScore"),0);if(score<0||score>100)throw new ApiError(400,"Match score must be 0 to 100");linkedin.searches(p);return store.put("preferences","preferences-current",p);}
- @GetMapping("/jobs/search-links") public List<Map<String,String>> searchLinks(){return linkedin.searches(preferences());}
- @PostMapping("/jobs/search") public Map<String,Object> search(){var links=searchLinks();var execution=store.create("execution",Map.of("status","MANUAL_LINKS_GENERATED","jobCount",0,"automaticDiscovery",false,"message","Open LinkedIn links, then import selected postings manually."));return Map.of("links",links,"execution",execution,"status","MANUAL_ONLY");}
- @GetMapping("/search-executions") public List<Map<String,Object>> executions(){return store.list("execution");}
- @PostMapping("/jobs/import") public Map<String,Object> importJob(@Valid @RequestBody dev.jobpilot.dto.JobImportRequest request){Map<String,Object> input=mapper.convertValue(request,new com.fasterxml.jackson.core.type.TypeReference<Map<String,Object>>(){});var url=linkedin.canonical(Input.required(input,"url",2000));var job=Input.fields(input,"title","company","location","description","workArrangement","employmentType","seniority","industry","salaryMin","salaryMax","currency","salaryPeriod","publishedAt","responsibilities","requirements","preferredQualifications","benefits","jobPoster");job.put("url",url.get("url"));job.put("originalUrl",input.get("url"));job.put("linkedinJobId",url.get("id"));job.put("availability","UNKNOWN");job.put("saved",false);job.put("source","LINKEDIN_MANUAL_IMPORT");job.put("discoveredAt",Instant.now().toString());job.put("lastVerifiedAt",null);if(Input.text(job,"title").isEmpty())job.put("title","LinkedIn job "+url.get("id"));for(String k:List.of("company","location","description","workArrangement","employmentType","seniority"))job.putIfAbsent(k,"");if(Input.text(job,"description").length()>100000)throw new ApiError(400,"Description must be at most 100000 characters");job.putIfAbsent("currency","PLN");job.putIfAbsent("salaryPeriod","MONTHLY");job.put("salarySource",(job.get("salaryMin")!=null||job.get("salaryMax")!=null)?"ADVERTISED":"UNDISCLOSED");validateSalary(job);return store.importJob("linkedin:"+url.get("id"),job);}
- @GetMapping("/jobs/{id}") public Map<String,Object> job(@PathVariable String id){return store.get("job",id);}
- @PatchMapping("/jobs/{id}") public Map<String,Object> updateJob(@PathVariable String id,@RequestBody Map<String,Object> input){var job=new LinkedHashMap<>(job(id));job.putAll(Input.fields(input,"title","company","location","description","workArrangement","employmentType","seniority","industry","salaryMin","salaryMax","currency","salaryPeriod","publishedAt","responsibilities","requirements","preferredQualifications","benefits","jobPoster","saved","availability"));if(!Set.of("NEW","ACTIVE","EXPIRED","UNKNOWN").contains(job.get("availability")))throw new ApiError(400,"Invalid availability");if(input.containsKey("availability")){job.put("availabilitySource","USER_CONFIRMED");job.put("lastVerifiedAt",Instant.now().toString());}validateSalary(job);job.put("salarySource",job.get("salaryMin")!=null||job.get("salaryMax")!=null?"ADVERTISED":"UNDISCLOSED");return store.put("job",id,job);}
- private void validateSalary(Map<String,Object> job){if(!Input.text(job,"publishedAt").isBlank()){try{LocalDate.parse(Input.text(job,"publishedAt").substring(0,10));}catch(Exception e){throw new ApiError(400,"Publication date must be ISO YYYY-MM-DD");}}for(String k:List.of("salaryMin","salaryMax"))if(job.get(k)!=null&&(!(job.get(k) instanceof Number)||Input.num(job.get(k),-1)<0))throw new ApiError(400,"Salary must be a nonnegative number");if(job.get("salaryMin")!=null&&job.get("salaryMax")!=null&&Input.num(job.get("salaryMin"),0)>Input.num(job.get("salaryMax"),0))throw new ApiError(400,"Salary minimum exceeds maximum");if(!Input.text(job,"currency").matches("[A-Z]{3}"))throw new ApiError(400,"Invalid currency");if(!Set.of("MONTHLY","YEARLY","HOURLY").contains(job.get("salaryPeriod")))throw new ApiError(400,"Invalid salary period");}
- @GetMapping("/jobs") public Map<String,Object> jobs(@RequestParam(defaultValue="")String q,@RequestParam(defaultValue="")String company,@RequestParam(defaultValue="")String location,@RequestParam(defaultValue="")String workArrangement,@RequestParam(defaultValue="false")boolean saved,@RequestParam(defaultValue="0")int page,@RequestParam(defaultValue="20")int size,@RequestParam(defaultValue="newest")String sort,@RequestParam(required=false)Double minMatchScore,@RequestParam(defaultValue="")String seniority,@RequestParam(defaultValue="")String employmentType,@RequestParam(required=false)Integer publicationDays){if(page<0||page>100000||size<1||size>100)throw new ApiError(400,"Invalid page or size");var p=preferences();var result=new ArrayList<>(store.list("job").stream().filter(j->contains(j,"title",q)||contains(j,"company",q)||contains(j,"description",q)).filter(j->contains(j,"company",company)&&contains(j,"location",location)).filter(j->workArrangement.isBlank()||workArrangement.equals(j.get("workArrangement"))).filter(j->!saved||Input.bool(j,"saved")).filter(j->Input.num(j.get("matchScore"),-1)>=(minMatchScore==null?Input.num(p.get("minMatchScore"),0)==0?-1:Input.num(p.get("minMatchScore"),0):minMatchScore)).filter(j->matchesPreferences(j,p,seniority,employmentType,publicationDays)).filter(j->salaryMatches(j,p)).filter(j->Input.strings(p.get("excludedCompanies")).stream().noneMatch(s->Input.text(j,"company").equalsIgnoreCase(s))).filter(j->Input.strings(p.get("excludedKeywords")).stream().noneMatch(s->contains(j,"description",s)||contains(j,"title",s))).toList());Comparator<Map<String,Object>> cmp=switch(sort){case "match","bestMatch"->Comparator.comparingDouble(j->-Input.num(j.get("matchScore"),-1));case "salary"->Comparator.comparingDouble(j->"ADVERTISED".equals(j.get("salarySource"))&&Objects.equals(j.get("currency"),p.get("currency"))&&Objects.equals(j.get("salaryPeriod"),p.get("salaryPeriod"))?-Input.num(j.get("salaryMax"),Input.num(j.get("salaryMin"),-1)):1);case "company"->Comparator.comparing(j->Input.text(j,"company"));case "location"->Comparator.comparing(j->Input.text(j,"location"));default->Comparator.comparing((Map<String,Object>j)->Input.text(j,"createdAt")).reversed();};result.sort(cmp);int from=Math.min(page*size,result.size());return Map.of("items",result.subList(from,Math.min(from+size,result.size())),"total",result.size(),"page",page,"size",size);}
- private boolean matchesPreferences(Map<String,Object> job,Map<String,Object> p,String seniority,String employmentType,Integer publicationDays){
-  if(!seniority.isBlank()&&!seniority.equalsIgnoreCase(Input.text(job,"seniority")))return false;
-  if(!employmentType.isBlank()&&!employmentType.equalsIgnoreCase(Input.text(job,"employmentType")))return false;
-  for(var pair:List.of(new String[]{"companies","company"},new String[]{"industries","industry"},new String[]{"seniority","seniority"},new String[]{"employmentTypes","employmentType"})){
-   var values=Input.strings(p.get(pair[0]));if(!values.isEmpty()&&values.stream().noneMatch(v->Input.text(job,pair[1]).equalsIgnoreCase(v)))return false;
+  private final Store store;
+  private final LinkedIn linkedin;
+  private final Tasks tasks;
+  private final Worker worker;
+  private final MatchingService matching;
+  private final com.fasterxml.jackson.databind.ObjectMapper mapper;
+
+  Api(
+      Store store,
+      LinkedIn linkedin,
+      Tasks tasks,
+      Worker worker,
+      MatchingService matching,
+      com.fasterxml.jackson.databind.ObjectMapper mapper) {
+    this.store = store;
+    this.linkedin = linkedin;
+    this.tasks = tasks;
+    this.worker = worker;
+    this.matching = matching;
+    this.mapper = mapper;
   }
-  if(Input.strings(p.get("keywords")).stream().anyMatch(v->!contains(job,"title",v)&&!contains(job,"description",v)))return false;
-  int days=publicationDays==null?(int)Input.num(p.get("publicationDays"),30):publicationDays;
-  if(days<0||days>365)throw new ApiError(400,"Publication window must be 0 to 365 days");
-  String date=Input.text(job,"publishedAt");if(days>0&&!date.isBlank()){
-   try{LocalDate d=LocalDate.parse(date.substring(0,10));if(d.isBefore(LocalDate.now(ZoneOffset.UTC).minusDays(days)))return false;}catch(Exception e){throw new ApiError(400,"Publication date must be an ISO date");}
+
+  private Map<String, Object> singleton(
+      String kind, java.util.function.Supplier<Map<String, Object>> defaults) {
+    try {
+      return store.get(kind, kind + "-current");
+    } catch (ApiError e) {
+      return store.put(kind, kind + "-current", defaults.get());
+    }
   }
-  return true;
- }
- private boolean contains(Map<String,Object> m,String k,String s){return Input.text(m,k).toLowerCase(Locale.ROOT).contains(s.toLowerCase(Locale.ROOT));}
- boolean salaryMatches(Map<String,Object> j,Map<String,Object> p){if(!Input.bool(p,"salaryFilterEnabled"))return true;if(j.get("salaryMin")==null&&j.get("salaryMax")==null)return Input.bool(p,"includeUndisclosedSalaries");if(!"ADVERTISED".equals(j.get("salarySource")))return true;if(!Objects.equals(j.get("currency"),p.get("currency"))||!Objects.equals(j.get("salaryPeriod"),p.get("salaryPeriod")))return true;double lo=Input.num(j.get("salaryMin"),Input.num(j.get("salaryMax"),0)),hi=Input.num(j.get("salaryMax"),lo);return hi>=Input.num(p.get("salaryMin"),0)&&lo<=Input.num(p.get("salaryMax"),Double.MAX_VALUE);}
- @GetMapping("/jobs/{id}/analysis") public Map<String,Object> analysis(@PathVariable String id){var job=job(id);if(!(job.get("analysis") instanceof Map))throw new ApiError(404,"Analyze this job first");return Input.map(job.get("analysis"));}
- @PostMapping("/jobs/{id}/analyze") public Map<String,Object> analyze(@PathVariable String id){job(id);return tasks.submit("JOB_ANALYSIS",()->{var j=new LinkedHashMap<>(job(id));var profile=new LinkedHashMap<>(candidate());var prefs=preferences();profile.put("preferredSalary",prefs.get("preferredSalary"));profile.put("location",Input.text(prefs,"city")+", "+Input.text(prefs,"country"));profile.put("workArrangements",prefs.get("workArrangements"));var result=matching.analyze(profile,j,settings());j.put("analysis",result);j.put("matchScore",result.get("score"));store.put("job",id,j);return result;});}
- @GetMapping("/tasks/{id}") public Map<String,Object> task(@PathVariable String id){return store.get("task",id);}
- @GetMapping("/dashboard") public Map<String,Object> dashboard(){var jobs=store.list("job");var apps=store.list("application");return Map.of("totalJobs",jobs.size(),"newJobs",jobs.stream().filter(j->!Input.bool(j,"saved")).count(),"strongMatches",jobs.stream().filter(j->Input.num(j.get("matchScore"),0)>=80).count(),"recruitersIdentified",store.list("recruiter").size(),"tailoredCvs",store.list("cv").size(),"applicationsSubmitted",apps.stream().filter(a->Input.bool(a,"submittedByUser")).count(),"interviewsScheduled",apps.stream().filter(a->"INTERVIEW".equals(a.get("status"))).count(),"recentJobs",jobs.stream().limit(6).toList(),"recentCvs",store.list("cv").stream().limit(5).toList(),"activity",store.list("application_event").stream().limit(8).toList());}
- private ResponseEntity<byte[]> attachment(byte[] data,String type,String filename){return ResponseEntity.ok().contentType(MediaType.parseMediaType(type)).header(HttpHeaders.CONTENT_DISPOSITION,"attachment; filename=\""+filename+"\"").body(data);}
- @GetMapping("/recruiters") public List<Map<String,Object>> recruiters(){return store.list("recruiter");}
- @GetMapping("/jobs/{id}/recruiters") public List<Map<String,Object>> recruiters(@PathVariable String id){job(id);return store.list("recruiter").stream().filter(r->id.equals(r.get("jobId"))).toList();}
- @PostMapping("/jobs/{id}/recruiters") public Map<String,Object> addRecruiter(@PathVariable String id,@RequestBody Map<String,Object> input){var j=job(id);var r=Input.fields(input,"name","position","company","profileUrl","businessContact","evidenceUrl","confidence","notes");Input.required(r,"name",200);String confidence=Input.text(r,"confidence");if(!Set.of("VERIFIED","LIKELY","GENERAL").contains(confidence))throw new ApiError(400,"Confidence must be VERIFIED, LIKELY, or GENERAL");String evidence=Input.required(r,"evidenceUrl",2000);publicUrl(evidence,false);if(!Input.text(r,"businessContact").isBlank()&&!Input.bool(input,"publicBusinessContactConfirmed"))throw new ApiError(400,"Confirm this is publicly listed business contact information");if(!Input.text(r,"profileUrl").isBlank())publicUrl(Input.text(r,"profileUrl"),true);if(confidence.equals("VERIFIED")&&!Input.bool(input,"confirmedAssociation"))throw new ApiError(400,"Confirm explicit association with this vacancy before marking VERIFIED");r.put("jobId",id);r.put("verifiedAt",Instant.now().toString());r.put("provenance","USER_PROVIDED_PUBLIC_EVIDENCE");r.putIfAbsent("company",j.get("company"));return store.create("recruiter",r);}
- private void publicUrl(String text,boolean linkedInOnly){try{var u=java.net.URI.create(text);String h=Objects.toString(u.getHost(),"").toLowerCase();if(!"https".equals(u.getScheme())||h.isBlank()||u.getUserInfo()!=null||u.getPort()!=-1||h.equals("localhost")||h.matches("[0-9.]+"))throw new Exception();if(linkedInOnly&&!(h.equals("linkedin.com")||h.endsWith(".linkedin.com")))throw new Exception();}catch(Exception e){throw new ApiError(400,"Use a public HTTPS evidence URL");}}
- @PostMapping("/jobs/{id}/recruiter-research") public Map<String,Object> recruiterResearch(@PathVariable String id){var j=job(id);return Map.of("status","MANUAL_ONLY","message","Recruiter not identified. Review public LinkedIn information and add a contact with evidence.","peopleSearchUrl","https://www.linkedin.com/search/results/people/?keywords="+LinkedIn.enc(Input.text(j,"company")+" recruiter"));}
- @PostMapping("/jobs/{id}/tailored-cv") public Map<String,Object> tailored(@PathVariable String id){var j=job(id);var c=candidate();Input.required(c,"name",200);if(Input.maps(c.get("verifiedFacts")).isEmpty())throw new ApiError(400,"Verify candidate facts before generating a CV");return tasks.submit("CV_GENERATION",()->generateCv(j,c));}
- private Map<String,Object> generateCv(Map<String,Object> job,Map<String,Object> c){var facts=Input.maps(c.get("verifiedFacts"));var ordered=new ArrayList<>(facts);String desc=(Input.text(job,"title")+" "+Input.text(job,"description")).toLowerCase(Locale.ROOT);ordered.sort(Comparator.comparingInt(f->-overlap(Input.text(f,"text"),desc)));var sections=ordered.stream().map(f->Map.of("heading",Input.text(f,"section"),"text",Input.text(f,"text"))).toList();var profile=new LinkedHashMap<String,Object>();profile.put("name",c.get("name"));profile.put("verified",true);profile.put("verifiedFacts",facts);var generated=worker.generate(Map.of("profile",profile,"sections",sections,"title","Tailored CV"));if(!Boolean.TRUE.equals(generated.get("pdfValid"))||!Boolean.TRUE.equals(generated.get("docxValid")))throw new ApiError(502,"Document validation failed");var cv=new LinkedHashMap<String,Object>();cv.put("jobId",job.get("id"));cv.put("candidateSnapshot",profile);cv.put("status","DRAFT");cv.put("documentId",generated.get("documentId"));cv.put("preview",generated.get("preview"));cv.put("original",facts.stream().map(f->f.get("section")+"\n"+f.get("text")).reduce((a,b)->a+"\n\n"+b).orElse(""));cv.put("sections",sections);cv.put("factIds",ordered.stream().map(f->f.get("id")).toList());cv.put("changes",List.of(Map.of("type","REORDERED","reason","Verified sections ordered by exact keyword overlap with this posting. All factual text is preserved; no qualifications were added.")));cv.put("engine","VERIFIED_FACTS_ONLY");return store.create("cv",cv);}
- private int overlap(String fact,String desc){return (int)Arrays.stream(fact.toLowerCase(Locale.ROOT).split("[^\\p{L}\\p{N}]+" )).filter(w->w.length()>3).distinct().filter(desc::contains).count();}
- @GetMapping("/jobs/{id}/cv-versions") public List<Map<String,Object>> versions(@PathVariable String id){job(id);return store.list("cv").stream().filter(c->id.equals(c.get("jobId"))).toList();}
- @GetMapping("/cvs") public List<Map<String,Object>> cvs(){return store.list("cv");}
- @PostMapping("/cvs/{id}/approve") public Map<String,Object> approve(@PathVariable String id){var cv=new LinkedHashMap<>(store.get("cv",id));if("REJECTED".equals(cv.get("status")))throw new ApiError(409,"Generate a new version after rejection");cv.put("status","APPROVED");cv.put("approvedAt",Instant.now().toString());return store.put("cv",id,cv);}
- @PostMapping("/cvs/{id}/reject") public Map<String,Object> reject(@PathVariable String id){var cv=new LinkedHashMap<>(store.get("cv",id));cv.put("status","REJECTED");return store.put("cv",id,cv);}
- @PutMapping("/cvs/{id}") public Map<String,Object> editCv(@PathVariable String id,@RequestBody Map<String,Object> input){var old=store.get("cv",id);var profile=Input.map(old.get("candidateSnapshot"));var approved=Input.maps(profile.get("verifiedFacts"));var ids=Input.strings(input.get("factIds"));if(ids.isEmpty()||ids.size()!=new HashSet<>(ids).size())throw new ApiError(400,"Choose unique verified fact IDs");var facts=ids.stream().map(fid->approved.stream().filter(f->fid.equals(f.get("id"))).findFirst().orElseThrow(()->new ApiError(400,"Only verified facts from this CV may be used"))).toList();var c=new LinkedHashMap<>(profile);c.put("verifiedFacts",facts);return tasks.submit("CV_REVISION",()->generateCv(job(Input.text(old,"jobId")),c));}
- @GetMapping("/cvs/{id}/download") public ResponseEntity<byte[]> downloadCv(@PathVariable String id,@RequestParam(defaultValue="pdf")String format){var cv=store.get("cv",id);if(!"APPROVED".equals(cv.get("status")))throw new ApiError(409,"Approve the CV before downloading");if(!Set.of("pdf","docx").contains(format))throw new ApiError(400,"Choose pdf or docx");return attachment(worker.download(Input.text(cv,"documentId"),format),format.equals("pdf")?"application/pdf":"application/vnd.openxmlformats-officedocument.wordprocessingml.document","jobpilot-cv."+format);}
- @PostMapping("/jobs/{id}/messages/generate") public Map<String,Object> generateMessages(@PathVariable String id,@RequestBody(required=false)Map<String,Object> input){var j=job(id);var c=candidate();if(Input.maps(c.get("verifiedFacts")).isEmpty())throw new ApiError(400,"Verify candidate facts before generating messages");var body=input==null?Map.<String,Object>of():input;String tone=Input.text(body,"tone");if(tone.isBlank())tone="Professional";if(tone.length()>50||Input.text(body,"personalNote").length()>5000)throw new ApiError(400,"Tone or personal note is too long");String finalTone=tone;return tasks.submit("OUTREACH_DRAFTS",()->{var r=recruiters(id).stream().filter(x->"VERIFIED".equals(x.get("confidence"))).findFirst();String salutation=finalTone.equalsIgnoreCase("Formal")?"Dear":finalTone.equalsIgnoreCase("Friendly")?"Hi":"Hello";String greeting=r.map(x->salutation+" "+Input.text(x,"name")+",").orElse(salutation+",");String role=Input.text(j,"title"),company=Input.text(j,"company"),name=Input.text(c,"name");String fact=Input.text(Input.maps(c.get("verifiedFacts")).getFirst(),"text");var drafts=new LinkedHashMap<String,String>();drafts.put("CONNECTION",greeting+" I’m interested in the "+role+" position at "+company+" and would welcome connecting. "+name);drafts.put("LINKEDIN",greeting+" I’m interested in "+role+" at "+company+". My verified background includes: "+fact+" I’d welcome a conversation about the role. "+name);drafts.put("EMAIL","Subject: "+role+" at "+company+"\n\n"+greeting+"\n\nI’m writing about the "+role+" position. My background includes: "+fact+"\n\nWould you be open to discussing the position?\n\n"+name);drafts.put("FOLLOW_UP",greeting+" I wanted to follow up on my interest in the "+role+" position. I’d appreciate any update you can share. Thank you, "+name);var result=new ArrayList<Map<String,Object>>();for(var entry:drafts.entrySet()){String text=entry.getValue();if(!Input.text(body,"personalNote").isBlank())text+="\n"+Input.text(body,"personalNote");result.add(store.create("message",Map.of("jobId",id,"type",entry.getKey(),"text",text,"tone",finalTone,"engine","VERIFIED_FACT_TEMPLATE","status","DRAFT")));}return result;});}
- @GetMapping("/jobs/{id}/messages") public List<Map<String,Object>> messages(@PathVariable String id){job(id);return store.list("message").stream().filter(m->id.equals(m.get("jobId"))).toList();}
- @PatchMapping("/messages/{id}") public Map<String,Object> message(@PathVariable String id,@RequestBody Map<String,Object> input){var m=new LinkedHashMap<>(store.get("message",id));m.put("text",Input.required(input,"text",15000));m.put("editedByUser",true);return store.put("message",id,m);}
- private static final Set<String> APPLICATION_STATUSES=Set.of("DISCOVERED","SAVED","CV_PREPARED","APPLIED","RECRUITER_CONTACTED","INTERVIEW","OFFER","REJECTED","WITHDRAWN");
- @GetMapping("/applications") public List<Map<String,Object>> applications(){return store.list("application");}
- @PostMapping("/applications") public Map<String,Object> application(@RequestBody Map<String,Object> input){String jobId=Input.required(input,"jobId",100);job(jobId);if(store.list("application").stream().anyMatch(a->jobId.equals(a.get("jobId"))))throw new ApiError(409,"Application already tracked");var a=new LinkedHashMap<String,Object>();a.put("jobId",jobId);a.put("status","DISCOVERED");updateApplicationFields(a,input);var saved=store.create("application",a);event(saved,null);return saved;}
- @PatchMapping("/applications/{id}") public Map<String,Object> application(@PathVariable String id,@RequestBody Map<String,Object> input){var a=new LinkedHashMap<>(store.get("application",id));String previous=Input.text(a,"status");updateApplicationFields(a,input);var saved=store.put("application",id,a);event(saved,previous);return saved;}
- private void updateApplicationFields(Map<String,Object> a,Map<String,Object> input){String s=Input.text(input,"status");if(!s.isBlank()){if(!APPLICATION_STATUSES.contains(s))throw new ApiError(400,"Invalid application status");if(s.equals("APPLIED")&&!s.equals(a.get("status"))&&!Input.bool(input,"confirmApplied"))throw new ApiError(400,"Confirm you personally submitted this application");if(s.equals("APPLIED")&&Input.bool(input,"confirmApplied")){a.put("submittedByUser",true);a.put("submittedAt",Instant.now().toString());}a.put("status",s);}a.putAll(Input.fields(input,"notes","followUpDate","interviewDate","interviewNotes","salaryExpectation","offerDetails","recruiterId"));if(input.get("recruiterId")!=null&&!Input.text(input,"recruiterId").isBlank()){var r=store.get("recruiter",Input.text(input,"recruiterId"));if(!Objects.equals(r.get("jobId"),a.get("jobId")))throw new ApiError(400,"Recruiter must belong to this job");}a.put("updatedAt",Instant.now().toString());}
- private void event(Map<String,Object> a,String previous){var e=new LinkedHashMap<String,Object>();e.put("applicationId",a.get("id"));e.put("jobId",a.get("jobId"));e.put("previousStatus",previous);e.put("status",a.get("status"));e.put("source","USER_ACTION");store.create("application_event",e);var j=new LinkedHashMap<>(job(Input.text(a,"jobId")));j.put("applicationStatus",a.get("status"));store.put("job",Input.text(a,"jobId"),j);}
- @GetMapping("/applications/{id}/events") public List<Map<String,Object>> events(@PathVariable String id){store.get("application",id);return store.list("application_event").stream().filter(e->id.equals(e.get("applicationId"))).toList();}
+
+  @GetMapping("/candidates/current")
+  public Map<String, Object> candidate() {
+    return singleton("candidate", Defaults::candidate);
+  }
+
+  @PutMapping("/candidates/current")
+  public Map<String, Object> candidate(
+      @Valid @RequestBody dev.jobpilot.dto.CandidateUpdate request) {
+    Map<String, Object> input =
+        mapper.convertValue(
+            request, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+    var c = new LinkedHashMap<>(candidate());
+    String name = Input.text(input, "name");
+    if (name.length() > 200) throw new ApiError(400, "Name is too long");
+    c.put("name", name);
+    c.put("summary", Input.text(input, "summary"));
+    var facts = Input.maps(input.get("verifiedFacts"));
+    Set<String> ids = new HashSet<>();
+    for (var f : facts) {
+      String id = Input.text(f, "id");
+      if (id.isBlank()) f.put("id", UUID.randomUUID().toString());
+      if (!ids.add(Input.text(f, "id"))) throw new ApiError(400, "Fact IDs must be unique");
+      Input.required(f, "section", 100);
+      Input.required(f, "text", 5000);
+    }
+    if (facts.size() > 150) throw new ApiError(400, "At most 150 verified facts are supported");
+    c.putAll(Input.fields(input, "careerGoals", "location", "workArrangements", "preferredSalary"));
+    c.put("verifiedFacts", facts);
+    if (input.containsKey("pendingFacts"))
+      c.put("pendingFacts", Input.maps(input.get("pendingFacts")));
+    return store.put("candidate", "candidate-current", c);
+  }
+
+  @PostMapping(value = "/candidates/cv", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+  public Map<String, Object> upload(@RequestPart("file") MultipartFile file) {
+    var parsed = worker.parse(file);
+    var c = new LinkedHashMap<>(candidate());
+    var pending = Input.maps(c.get("pendingFacts"));
+    pending.addAll(Input.maps(parsed.get("pendingFacts")));
+    c.put("pendingFacts", pending);
+    var docs = Input.maps(c.get("documents"));
+    docs.add(Input.fields(parsed, "documentId", "originalName", "warnings"));
+    c.put("documents", docs);
+    c.put("lastExtractedText", parsed.get("text"));
+    return store.put("candidate", "candidate-current", c);
+  }
+
+  @GetMapping("/candidates/documents/{id}/download")
+  public ResponseEntity<byte[]> original(@PathVariable String id) {
+    boolean owned =
+        Input.maps(candidate().get("documents")).stream()
+            .anyMatch(d -> id.equals(d.get("documentId")));
+    if (!owned) throw new ApiError(404, "Document not found");
+    return attachment(worker.download(id, "original"), "application/octet-stream", "original-cv");
+  }
+
+  @DeleteMapping("/candidates/current")
+  public Map<String, Object> deleteCandidate(
+      @RequestParam(defaultValue = "false") boolean confirm) {
+    if (!confirm)
+      throw new ApiError(
+          400, "confirm=true is required to delete all local candidate and job data");
+    tasks.withoutActiveTasks(
+        () -> {
+          worker.deleteAll();
+          store.deleteAll();
+        });
+    return Map.of("deleted", true);
+  }
+
+  @GetMapping("/settings")
+  public Map<String, Object> settings() {
+    return singleton("settings", Defaults::settings);
+  }
+
+  @PutMapping("/settings")
+  public Map<String, Object> settings(@RequestBody Map<String, Object> input) {
+    var current = new LinkedHashMap<>(settings());
+    if (input.containsKey("ai")) {
+      var ai = new LinkedHashMap<>(Input.map(input.get("ai")));
+      String provider = Input.text(ai, "provider").toUpperCase(Locale.ROOT).replace('_', '-');
+      if (!Set.of("OLLAMA", "OPENAI_COMPATIBLE", "OPENAI-COMPATIBLE", "DISABLED")
+          .contains(provider)) throw new ApiError(400, "Unsupported AI provider");
+      Input.required(ai, "model", 120);
+      if (!Input.text(ai, "model").matches("[a-zA-Z0-9._:/@-]+"))
+        throw new ApiError(400, "Invalid model name");
+      if (ai.containsKey("maxTokens")) {
+        double tokens = Input.num(ai.get("maxTokens"), -1);
+        if (tokens < 128 || tokens > 4096 || tokens != Math.rint(tokens))
+          throw new ApiError(400, "Max tokens must be128 to4096");
+      }
+      double temp = Input.num(ai.get("temperature"), .2);
+      if (temp < 0 || temp > 1) throw new ApiError(400, "Temperature must be 0 to 1");
+      if (provider.startsWith("OPENAI") && !Input.bool(ai, "externalConsent"))
+        throw new ApiError(400, "Explicit external AI consent is required");
+      ai.put("provider", provider);
+      current.put(
+          "ai",
+          Input.fields(ai, "provider", "model", "temperature", "externalConsent", "maxTokens"));
+    }
+    if (input.containsKey("matchingWeights")) {
+      var weights = Input.map(input.get("matchingWeights"));
+      double sum = 0;
+      for (String key : List.of("experience", "skills", "seniority", "growth", "location")) {
+        double w = Input.num(weights.get(key), -1);
+        if (w < 0 || w > 100 || w != Math.rint(w))
+          throw new ApiError(400, "Each matching weight must be 0 to 100");
+        sum += w;
+      }
+      if (Math.abs(sum - 100) > .01) throw new ApiError(400, "Matching weights must sum to 100");
+      current.put("matchingWeights", weights);
+    }
+    return store.put("settings", "settings-current", current);
+  }
+
+  @GetMapping("/search-preferences")
+  public Map<String, Object> preferences() {
+    return singleton("preferences", Defaults::preferences);
+  }
+
+  @PutMapping("/search-preferences")
+  public Map<String, Object> preferences(@RequestBody Map<String, Object> input) {
+    var p = new LinkedHashMap<>(preferences());
+    p.putAll(
+        Input.fields(
+            input,
+            "titles",
+            "city",
+            "country",
+            "workArrangements",
+            "publicationDays",
+            "keywords",
+            "excludedCompanies",
+            "excludedKeywords",
+            "companies",
+            "industries",
+            "seniority",
+            "employmentTypes",
+            "minMatchScore",
+            "salaryFilterEnabled",
+            "preferredSalary",
+            "salaryMin",
+            "salaryMax",
+            "currency",
+            "salaryPeriod",
+            "includeUndisclosedSalaries"));
+    p.put("scheduleEnabled", false);
+    for (var t : Input.maps(p.get("titles"))) Input.required(t, "title", 200);
+    double min = Input.num(p.get("salaryMin"), 0),
+        max = Input.num(p.get("salaryMax"), Double.MAX_VALUE);
+    if (min < 0 || max < min) throw new ApiError(400, "Invalid salary range");
+    if (!Input.text(p, "currency").matches("[A-Z]{3}"))
+      throw new ApiError(400, "Currency must be a three-letter code");
+    if (!Set.of("MONTHLY", "YEARLY", "HOURLY").contains(p.get("salaryPeriod")))
+      throw new ApiError(400, "Invalid salary period");
+    double score = Input.num(p.get("minMatchScore"), 0);
+    if (score < 0 || score > 100) throw new ApiError(400, "Match score must be 0 to 100");
+    linkedin.searches(p);
+    return store.put("preferences", "preferences-current", p);
+  }
+
+  @GetMapping("/jobs/search-links")
+  public List<Map<String, String>> searchLinks() {
+    return linkedin.searches(preferences());
+  }
+
+  @PostMapping("/jobs/search")
+  public Map<String, Object> search() {
+    var links = searchLinks();
+    var execution =
+        store.create(
+            "execution",
+            Map.of(
+                "status",
+                "MANUAL_LINKS_GENERATED",
+                "jobCount",
+                0,
+                "automaticDiscovery",
+                false,
+                "message",
+                "Open LinkedIn links, then import selected postings manually."));
+    return Map.of("links", links, "execution", execution, "status", "MANUAL_ONLY");
+  }
+
+  @GetMapping("/search-executions")
+  public List<Map<String, Object>> executions() {
+    return store.list("execution");
+  }
+
+  @PostMapping("/jobs/import")
+  public Map<String, Object> importJob(
+      @Valid @RequestBody dev.jobpilot.dto.JobImportRequest request) {
+    Map<String, Object> input =
+        mapper.convertValue(
+            request, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+    var url = linkedin.canonical(Input.required(input, "url", 2000));
+    var job =
+        Input.fields(
+            input,
+            "title",
+            "company",
+            "location",
+            "description",
+            "workArrangement",
+            "employmentType",
+            "seniority",
+            "industry",
+            "salaryMin",
+            "salaryMax",
+            "currency",
+            "salaryPeriod",
+            "publishedAt",
+            "responsibilities",
+            "requirements",
+            "preferredQualifications",
+            "benefits",
+            "jobPoster");
+    job.put("url", url.get("url"));
+    job.put("originalUrl", input.get("url"));
+    job.put("linkedinJobId", url.get("id"));
+    job.put("availability", "UNKNOWN");
+    job.put("saved", false);
+    job.put("source", "LINKEDIN_MANUAL_IMPORT");
+    job.put("discoveredAt", Instant.now().toString());
+    job.put("lastVerifiedAt", null);
+    if (Input.text(job, "title").isEmpty()) job.put("title", "LinkedIn job " + url.get("id"));
+    for (String k :
+        List.of(
+            "company", "location", "description", "workArrangement", "employmentType", "seniority"))
+      job.putIfAbsent(k, "");
+    if (Input.text(job, "description").length() > 100000)
+      throw new ApiError(400, "Description must be at most 100000 characters");
+    job.putIfAbsent("currency", "PLN");
+    job.putIfAbsent("salaryPeriod", "MONTHLY");
+    job.put(
+        "salarySource",
+        (job.get("salaryMin") != null || job.get("salaryMax") != null)
+            ? "ADVERTISED"
+            : "UNDISCLOSED");
+    validateSalary(job);
+    return store.importJob("linkedin:" + url.get("id"), job);
+  }
+
+  @GetMapping("/jobs/{id}")
+  public Map<String, Object> job(@PathVariable String id) {
+    return store.get("job", id);
+  }
+
+  @PatchMapping("/jobs/{id}")
+  public Map<String, Object> updateJob(
+      @PathVariable String id, @RequestBody Map<String, Object> input) {
+    var job = new LinkedHashMap<>(job(id));
+    job.putAll(
+        Input.fields(
+            input,
+            "title",
+            "company",
+            "location",
+            "description",
+            "workArrangement",
+            "employmentType",
+            "seniority",
+            "industry",
+            "salaryMin",
+            "salaryMax",
+            "currency",
+            "salaryPeriod",
+            "publishedAt",
+            "responsibilities",
+            "requirements",
+            "preferredQualifications",
+            "benefits",
+            "jobPoster",
+            "saved",
+            "availability"));
+    if (!Set.of("NEW", "ACTIVE", "EXPIRED", "UNKNOWN").contains(job.get("availability")))
+      throw new ApiError(400, "Invalid availability");
+    if (input.containsKey("availability")) {
+      job.put("availabilitySource", "USER_CONFIRMED");
+      job.put("lastVerifiedAt", Instant.now().toString());
+    }
+    validateSalary(job);
+    job.put(
+        "salarySource",
+        job.get("salaryMin") != null || job.get("salaryMax") != null
+            ? "ADVERTISED"
+            : "UNDISCLOSED");
+    return store.put("job", id, job);
+  }
+
+  private void validateSalary(Map<String, Object> job) {
+    if (!Input.text(job, "publishedAt").isBlank()) {
+      try {
+        String date = Input.text(job, "publishedAt");
+        if (date.length() == 10) LocalDate.parse(date);
+        else OffsetDateTime.parse(date);
+      } catch (Exception e) {
+        throw new ApiError(400, "Publication date must be ISO YYYY-MM-DD");
+      }
+    }
+    if (!Set.of("", "UNKNOWN", "REMOTE", "HYBRID", "ON_SITE")
+        .contains(Input.text(job, "workArrangement")))
+      throw new ApiError(400, "Invalid work arrangement");
+    for (String field :
+        List.of(
+            "title",
+            "company",
+            "location",
+            "description",
+            "industry",
+            "employmentType",
+            "seniority")) {
+      if (job.containsKey(field) && !(job.get(field) instanceof String))
+        throw new ApiError(400, field + " must be text");
+      if (Input.text(job, field).length() > (field.equals("description") ? 100000 : 500))
+        throw new ApiError(400, field + " is too long");
+    }
+    for (String k : List.of("salaryMin", "salaryMax"))
+      if (job.get(k) != null
+          && (!(job.get(k) instanceof Number)
+              || !Double.isFinite(Input.num(job.get(k), -1))
+              || Input.num(job.get(k), -1) < 0))
+        throw new ApiError(400, "Salary must be a nonnegative number");
+    if (job.get("salaryMin") != null
+        && job.get("salaryMax") != null
+        && Input.num(job.get("salaryMin"), 0) > Input.num(job.get("salaryMax"), 0))
+      throw new ApiError(400, "Salary minimum exceeds maximum");
+    if (!Input.text(job, "currency").matches("[A-Z]{3}"))
+      throw new ApiError(400, "Invalid currency");
+    if (!Set.of("MONTHLY", "YEARLY", "HOURLY").contains(job.get("salaryPeriod")))
+      throw new ApiError(400, "Invalid salary period");
+  }
+
+  @GetMapping("/jobs")
+  public Map<String, Object> jobs(
+      @RequestParam(defaultValue = "") String q,
+      @RequestParam(defaultValue = "") String company,
+      @RequestParam(defaultValue = "") String location,
+      @RequestParam(defaultValue = "") String workArrangement,
+      @RequestParam(defaultValue = "false") boolean saved,
+      @RequestParam(defaultValue = "0") int page,
+      @RequestParam(defaultValue = "20") int size,
+      @RequestParam(defaultValue = "newest") String sort,
+      @RequestParam(required = false) Double minMatchScore,
+      @RequestParam(defaultValue = "") String seniority,
+      @RequestParam(defaultValue = "") String employmentType,
+      @RequestParam(required = false) Integer publicationDays) {
+    if (page < 0 || page > 100000 || size < 1 || size > 100)
+      throw new ApiError(400, "Invalid page or size");
+    var p = preferences();
+    var result =
+        new ArrayList<>(
+            store.list("job").stream()
+                .filter(
+                    j ->
+                        contains(j, "title", q)
+                            || contains(j, "company", q)
+                            || contains(j, "description", q))
+                .filter(j -> contains(j, "company", company) && contains(j, "location", location))
+                .filter(
+                    j ->
+                        workArrangement.isBlank()
+                            || workArrangement.equals(j.get("workArrangement")))
+                .filter(j -> !saved || Input.bool(j, "saved"))
+                .filter(
+                    j ->
+                        Input.num(j.get("matchScore"), -1)
+                            >= (minMatchScore == null
+                                ? Input.num(p.get("minMatchScore"), 0) == 0
+                                    ? -1
+                                    : Input.num(p.get("minMatchScore"), 0)
+                                : minMatchScore))
+                .filter(j -> matchesPreferences(j, p, seniority, employmentType, publicationDays))
+                .filter(j -> salaryMatches(j, p))
+                .filter(
+                    j ->
+                        Input.strings(p.get("excludedCompanies")).stream()
+                            .noneMatch(s -> Input.text(j, "company").equalsIgnoreCase(s)))
+                .filter(
+                    j ->
+                        Input.strings(p.get("excludedKeywords")).stream()
+                            .noneMatch(
+                                s -> contains(j, "description", s) || contains(j, "title", s)))
+                .toList());
+    Comparator<Map<String, Object>> cmp =
+        switch (sort) {
+          case "match", "bestMatch" ->
+              Comparator.comparingDouble(j -> -Input.num(j.get("matchScore"), -1));
+          case "salary" ->
+              Comparator.comparingDouble(
+                  j ->
+                      "ADVERTISED".equals(j.get("salarySource"))
+                              && Objects.equals(j.get("currency"), p.get("currency"))
+                              && Objects.equals(j.get("salaryPeriod"), p.get("salaryPeriod"))
+                          ? -Input.num(j.get("salaryMax"), Input.num(j.get("salaryMin"), -1))
+                          : 1);
+          case "company" -> Comparator.comparing(j -> Input.text(j, "company"));
+          case "location" -> Comparator.comparing(j -> Input.text(j, "location"));
+          default ->
+              Comparator.comparing((Map<String, Object> j) -> Input.text(j, "createdAt"))
+                  .reversed();
+        };
+    result.sort(cmp);
+    int from = Math.min(page * size, result.size());
+    return Map.of(
+        "items",
+        result.subList(from, Math.min(from + size, result.size())),
+        "total",
+        result.size(),
+        "page",
+        page,
+        "size",
+        size);
+  }
+
+  private boolean matchesPreferences(
+      Map<String, Object> job,
+      Map<String, Object> p,
+      String seniority,
+      String employmentType,
+      Integer publicationDays) {
+    if (!seniority.isBlank() && !seniority.equalsIgnoreCase(Input.text(job, "seniority")))
+      return false;
+    if (!employmentType.isBlank()
+        && !employmentType.equalsIgnoreCase(Input.text(job, "employmentType"))) return false;
+    for (var pair :
+        List.of(
+            new String[] {"companies", "company"},
+            new String[] {"industries", "industry"},
+            new String[] {"seniority", "seniority"},
+            new String[] {"employmentTypes", "employmentType"})) {
+      var values = Input.strings(p.get(pair[0]));
+      if (!values.isEmpty()
+          && values.stream().noneMatch(v -> Input.text(job, pair[1]).equalsIgnoreCase(v)))
+        return false;
+    }
+    if (Input.strings(p.get("keywords")).stream()
+        .anyMatch(v -> !contains(job, "title", v) && !contains(job, "description", v)))
+      return false;
+    int days =
+        publicationDays == null ? (int) Input.num(p.get("publicationDays"), 30) : publicationDays;
+    if (days < 0 || days > 365) throw new ApiError(400, "Publication window must be 0 to 365 days");
+    String date = Input.text(job, "publishedAt");
+    if (days > 0 && !date.isBlank()) {
+      try {
+        LocalDate d = LocalDate.parse(date.substring(0, 10));
+        if (d.isBefore(LocalDate.now(ZoneOffset.UTC).minusDays(days))) return false;
+      } catch (Exception e) {
+        throw new ApiError(400, "Publication date must be an ISO date");
+      }
+    }
+    return true;
+  }
+
+  private boolean contains(Map<String, Object> m, String k, String s) {
+    return Input.text(m, k).toLowerCase(Locale.ROOT).contains(s.toLowerCase(Locale.ROOT));
+  }
+
+  boolean salaryMatches(Map<String, Object> j, Map<String, Object> p) {
+    if (!Input.bool(p, "salaryFilterEnabled")) return true;
+    if (j.get("salaryMin") == null && j.get("salaryMax") == null)
+      return Input.bool(p, "includeUndisclosedSalaries");
+    if (!"ADVERTISED".equals(j.get("salarySource"))) return true;
+    if (!Objects.equals(j.get("currency"), p.get("currency"))
+        || !Objects.equals(j.get("salaryPeriod"), p.get("salaryPeriod"))) return true;
+    double lo = Input.num(j.get("salaryMin"), Input.num(j.get("salaryMax"), 0)),
+        hi = Input.num(j.get("salaryMax"), lo);
+    return hi >= Input.num(p.get("salaryMin"), 0)
+        && lo <= Input.num(p.get("salaryMax"), Double.MAX_VALUE);
+  }
+
+  @GetMapping("/jobs/{id}/analysis")
+  public Map<String, Object> analysis(@PathVariable String id) {
+    var job = job(id);
+    if (!(job.get("analysis") instanceof Map)) throw new ApiError(404, "Analyze this job first");
+    return Input.map(job.get("analysis"));
+  }
+
+  @PostMapping("/jobs/{id}/analyze")
+  public Map<String, Object> analyze(@PathVariable String id) {
+    job(id);
+    return tasks.submit(
+        "JOB_ANALYSIS",
+        () -> {
+          var j = new LinkedHashMap<>(job(id));
+          var profile = new LinkedHashMap<>(candidate());
+          var prefs = preferences();
+          profile.put("preferredSalary", prefs.get("preferredSalary"));
+          profile.put("preferredCurrency", prefs.get("currency"));
+          profile.put("preferredSalaryPeriod", prefs.get("salaryPeriod"));
+          profile.put(
+              "location",
+              Input.text(prefs, "city").isBlank()
+                  ? Input.text(prefs, "country")
+                  : Input.text(prefs, "city"));
+          profile.put("workArrangements", prefs.get("workArrangements"));
+          var result = matching.analyze(profile, j, settings());
+          j.put("analysis", result);
+          j.put("matchScore", result.get("score"));
+          store.put("job", id, j);
+          return result;
+        });
+  }
+
+  @GetMapping("/tasks/{id}")
+  public Map<String, Object> task(@PathVariable String id) {
+    return store.get("task", id);
+  }
+
+  @GetMapping("/dashboard")
+  public Map<String, Object> dashboard() {
+    var jobs = store.list("job");
+    var apps = store.list("application");
+    return Map.of(
+        "totalJobs",
+        jobs.size(),
+        "newJobs",
+        jobs.stream().filter(j -> !Input.bool(j, "saved")).count(),
+        "strongMatches",
+        jobs.stream().filter(j -> Input.num(j.get("matchScore"), 0) >= 80).count(),
+        "recruitersIdentified",
+        store.list("recruiter").size(),
+        "tailoredCvs",
+        store.list("cv").size(),
+        "applicationsSubmitted",
+        apps.stream().filter(a -> Input.bool(a, "submittedByUser")).count(),
+        "interviewsScheduled",
+        apps.stream().filter(a -> "INTERVIEW".equals(a.get("status"))).count(),
+        "recentJobs",
+        jobs.stream().limit(6).toList(),
+        "recentCvs",
+        store.list("cv").stream().limit(5).toList(),
+        "activity",
+        store.list("application_event").stream().limit(8).toList());
+  }
+
+  private ResponseEntity<byte[]> attachment(byte[] data, String type, String filename) {
+    return ResponseEntity.ok()
+        .contentType(MediaType.parseMediaType(type))
+        .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+        .body(data);
+  }
+
+  @GetMapping("/recruiters")
+  public List<Map<String, Object>> recruiters() {
+    return store.list("recruiter");
+  }
+
+  @GetMapping("/jobs/{id}/recruiters")
+  public List<Map<String, Object>> recruiters(@PathVariable String id) {
+    job(id);
+    return store.list("recruiter").stream().filter(r -> id.equals(r.get("jobId"))).toList();
+  }
+
+  @PostMapping("/jobs/{id}/recruiters")
+  public Map<String, Object> addRecruiter(
+      @PathVariable String id, @RequestBody Map<String, Object> input) {
+    var j = job(id);
+    var r =
+        Input.fields(
+            input,
+            "name",
+            "position",
+            "company",
+            "profileUrl",
+            "businessContact",
+            "evidenceUrl",
+            "confidence",
+            "notes");
+    Input.required(r, "name", 200);
+    String confidence = Input.text(r, "confidence");
+    if (!Set.of("VERIFIED", "LIKELY", "GENERAL").contains(confidence))
+      throw new ApiError(400, "Confidence must be VERIFIED, LIKELY, or GENERAL");
+    String evidence = Input.required(r, "evidenceUrl", 2000);
+    publicUrl(evidence, false);
+    if (!Input.text(r, "businessContact").isBlank()
+        && !Input.bool(input, "publicBusinessContactConfirmed"))
+      throw new ApiError(400, "Confirm this is publicly listed business contact information");
+    if (!Input.text(r, "profileUrl").isBlank()) publicUrl(Input.text(r, "profileUrl"), true);
+    if (confidence.equals("VERIFIED") && !Input.bool(input, "confirmedAssociation"))
+      throw new ApiError(
+          400, "Confirm explicit association with this vacancy before marking VERIFIED");
+    r.put("jobId", id);
+    r.put("verifiedAt", Instant.now().toString());
+    r.put("provenance", "USER_PROVIDED_PUBLIC_EVIDENCE");
+    r.putIfAbsent("company", j.get("company"));
+    return store.create("recruiter", r);
+  }
+
+  private void publicUrl(String text, boolean linkedInOnly) {
+    try {
+      var u = java.net.URI.create(text);
+      String h = Objects.toString(u.getHost(), "").toLowerCase();
+      if (!"https".equals(u.getScheme())
+          || h.isBlank()
+          || u.getUserInfo() != null
+          || u.getPort() != -1
+          || h.equals("localhost")
+          || h.matches("[0-9.]+")) throw new Exception();
+      if (linkedInOnly && !(h.equals("linkedin.com") || h.endsWith(".linkedin.com")))
+        throw new Exception();
+    } catch (Exception e) {
+      throw new ApiError(400, "Use a public HTTPS evidence URL");
+    }
+  }
+
+  @PostMapping("/jobs/{id}/recruiter-research")
+  public Map<String, Object> recruiterResearch(@PathVariable String id) {
+    var j = job(id);
+    return Map.of(
+        "status",
+        "MANUAL_ONLY",
+        "message",
+        "Recruiter not identified. Review public LinkedIn information and add a contact with"
+            + " evidence.",
+        "peopleSearchUrl",
+        "https://www.linkedin.com/search/results/people/?keywords="
+            + LinkedIn.enc(Input.text(j, "company") + " recruiter"));
+  }
+
+  @PostMapping("/jobs/{id}/tailored-cv")
+  public Map<String, Object> tailored(@PathVariable String id) {
+    var j = job(id);
+    var c = candidate();
+    Input.required(c, "name", 200);
+    if (Input.maps(c.get("verifiedFacts")).isEmpty())
+      throw new ApiError(400, "Verify candidate facts before generating a CV");
+    return tasks.submit("CV_GENERATION", () -> generateCv(j, c));
+  }
+
+  private Map<String, Object> generateCv(Map<String, Object> job, Map<String, Object> c) {
+    var facts = Input.maps(c.get("verifiedFacts"));
+    var ordered = new ArrayList<>(facts);
+    String desc =
+        (Input.text(job, "title") + " " + Input.text(job, "description")).toLowerCase(Locale.ROOT);
+    ordered.sort(Comparator.comparingInt(f -> -overlap(Input.text(f, "text"), desc)));
+    var sections =
+        ordered.stream()
+            .map(f -> Map.of("heading", Input.text(f, "section"), "text", Input.text(f, "text")))
+            .toList();
+    var profile = new LinkedHashMap<String, Object>();
+    profile.put("name", c.get("name"));
+    profile.put("verified", true);
+    profile.put("verifiedFacts", facts);
+    var generated =
+        worker.generate(Map.of("profile", profile, "sections", sections, "title", "Tailored CV"));
+    if (!Boolean.TRUE.equals(generated.get("pdfValid"))
+        || !Boolean.TRUE.equals(generated.get("docxValid")))
+      throw new ApiError(502, "Document validation failed");
+    var cv = new LinkedHashMap<String, Object>();
+    cv.put("jobId", job.get("id"));
+    cv.put("candidateSnapshot", profile);
+    cv.put("status", "DRAFT");
+    cv.put("documentId", generated.get("documentId"));
+    cv.put("preview", generated.get("preview"));
+    cv.put(
+        "original",
+        facts.stream()
+            .map(f -> f.get("section") + "\n" + f.get("text"))
+            .reduce((a, b) -> a + "\n\n" + b)
+            .orElse(""));
+    cv.put("sections", sections);
+    cv.put("factIds", ordered.stream().map(f -> f.get("id")).toList());
+    cv.put(
+        "changes",
+        List.of(
+            Map.of(
+                "type",
+                "REORDERED",
+                "reason",
+                "Verified sections ordered by exact keyword overlap with this posting. All factual"
+                    + " text is preserved; no qualifications were added.")));
+    cv.put("engine", "VERIFIED_FACTS_ONLY");
+    return store.create("cv", cv);
+  }
+
+  private int overlap(String fact, String desc) {
+    return (int)
+        Arrays.stream(fact.toLowerCase(Locale.ROOT).split("[^\\p{L}\\p{N}]+"))
+            .filter(w -> w.length() > 3)
+            .distinct()
+            .filter(desc::contains)
+            .count();
+  }
+
+  @GetMapping("/jobs/{id}/cv-versions")
+  public List<Map<String, Object>> versions(@PathVariable String id) {
+    job(id);
+    return store.list("cv").stream().filter(c -> id.equals(c.get("jobId"))).toList();
+  }
+
+  @GetMapping("/cvs")
+  public List<Map<String, Object>> cvs() {
+    return store.list("cv");
+  }
+
+  @PostMapping("/cvs/{id}/approve")
+  public Map<String, Object> approve(@PathVariable String id) {
+    var cv = new LinkedHashMap<>(store.get("cv", id));
+    if ("REJECTED".equals(cv.get("status")))
+      throw new ApiError(409, "Generate a new version after rejection");
+    cv.put("status", "APPROVED");
+    cv.put("approvedAt", Instant.now().toString());
+    return store.put("cv", id, cv);
+  }
+
+  @PostMapping("/cvs/{id}/reject")
+  public Map<String, Object> reject(@PathVariable String id) {
+    var cv = new LinkedHashMap<>(store.get("cv", id));
+    cv.put("status", "REJECTED");
+    return store.put("cv", id, cv);
+  }
+
+  @PutMapping("/cvs/{id}")
+  public Map<String, Object> editCv(
+      @PathVariable String id, @RequestBody Map<String, Object> input) {
+    var old = store.get("cv", id);
+    var profile = Input.map(old.get("candidateSnapshot"));
+    var approved = Input.maps(profile.get("verifiedFacts"));
+    var ids = Input.strings(input.get("factIds"));
+    if (ids.isEmpty() || ids.size() != new HashSet<>(ids).size())
+      throw new ApiError(400, "Choose unique verified fact IDs");
+    var facts =
+        ids.stream()
+            .map(
+                fid ->
+                    approved.stream()
+                        .filter(f -> fid.equals(f.get("id")))
+                        .findFirst()
+                        .orElseThrow(
+                            () ->
+                                new ApiError(400, "Only verified facts from this CV may be used")))
+            .toList();
+    var c = new LinkedHashMap<>(profile);
+    c.put("verifiedFacts", facts);
+    return tasks.submit("CV_REVISION", () -> generateCv(job(Input.text(old, "jobId")), c));
+  }
+
+  @GetMapping("/cvs/{id}/download")
+  public ResponseEntity<byte[]> downloadCv(
+      @PathVariable String id, @RequestParam(defaultValue = "pdf") String format) {
+    var cv = store.get("cv", id);
+    if (!"APPROVED".equals(cv.get("status")))
+      throw new ApiError(409, "Approve the CV before downloading");
+    if (!Set.of("pdf", "docx").contains(format)) throw new ApiError(400, "Choose pdf or docx");
+    return attachment(
+        worker.download(Input.text(cv, "documentId"), format),
+        format.equals("pdf")
+            ? "application/pdf"
+            : "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "jobpilot-cv." + format);
+  }
+
+  @PostMapping("/jobs/{id}/messages/generate")
+  public Map<String, Object> generateMessages(
+      @PathVariable String id, @RequestBody(required = false) Map<String, Object> input) {
+    var j = job(id);
+    var c = candidate();
+    if (Input.maps(c.get("verifiedFacts")).isEmpty())
+      throw new ApiError(400, "Verify candidate facts before generating messages");
+    var body = input == null ? Map.<String, Object>of() : input;
+    String tone = Input.text(body, "tone");
+    if (tone.isBlank()) tone = "Professional";
+    if (tone.length() > 50 || Input.text(body, "personalNote").length() > 5000)
+      throw new ApiError(400, "Tone or personal note is too long");
+    String finalTone = tone;
+    return tasks.submit(
+        "OUTREACH_DRAFTS",
+        () -> {
+          var r =
+              recruiters(id).stream()
+                  .filter(x -> "VERIFIED".equals(x.get("confidence")))
+                  .findFirst();
+          String salutation =
+              finalTone.equalsIgnoreCase("Formal")
+                  ? "Dear"
+                  : finalTone.equalsIgnoreCase("Friendly") ? "Hi" : "Hello";
+          String greeting =
+              r.map(x -> salutation + " " + Input.text(x, "name") + ",").orElse(salutation + ",");
+          String role = Input.text(j, "title"),
+              company = Input.text(j, "company"),
+              name = Input.text(c, "name");
+          String fact = Input.text(Input.maps(c.get("verifiedFacts")).getFirst(), "text");
+          var drafts = new LinkedHashMap<String, String>();
+          drafts.put(
+              "CONNECTION",
+              greeting
+                  + " I’m interested in the "
+                  + role
+                  + " position at "
+                  + company
+                  + " and would welcome connecting. "
+                  + name);
+          drafts.put(
+              "LINKEDIN",
+              greeting
+                  + " I’m interested in "
+                  + role
+                  + " at "
+                  + company
+                  + ". My background includes: "
+                  + fact
+                  + " I’d welcome a conversation about the role. "
+                  + name);
+          drafts.put(
+              "EMAIL",
+              "Subject: "
+                  + role
+                  + " at "
+                  + company
+                  + "\n\n"
+                  + greeting
+                  + "\n\nI’m writing about the "
+                  + role
+                  + " position. My background includes: "
+                  + fact
+                  + "\n\nWould you be open to discussing the position?\n\n"
+                  + name);
+          drafts.put(
+              "FOLLOW_UP",
+              greeting
+                  + " I wanted to follow up on my interest in the "
+                  + role
+                  + " position. I’d appreciate any update you can share. Thank you, "
+                  + name);
+          var result = new ArrayList<Map<String, Object>>();
+          for (var entry : drafts.entrySet()) {
+            String text = entry.getValue();
+            if (!Input.text(body, "personalNote").isBlank())
+              text += "\n" + Input.text(body, "personalNote");
+            result.add(
+                store.create(
+                    "message",
+                    Map.of(
+                        "jobId",
+                        id,
+                        "type",
+                        entry.getKey(),
+                        "text",
+                        text,
+                        "tone",
+                        finalTone,
+                        "engine",
+                        "VERIFIED_FACT_TEMPLATE",
+                        "status",
+                        "DRAFT")));
+          }
+          return result;
+        });
+  }
+
+  @GetMapping("/jobs/{id}/messages")
+  public List<Map<String, Object>> messages(@PathVariable String id) {
+    job(id);
+    return store.list("message").stream().filter(m -> id.equals(m.get("jobId"))).toList();
+  }
+
+  @PatchMapping("/messages/{id}")
+  public Map<String, Object> message(
+      @PathVariable String id, @RequestBody Map<String, Object> input) {
+    var m = new LinkedHashMap<>(store.get("message", id));
+    m.put("text", Input.required(input, "text", 15000));
+    m.put("editedByUser", true);
+    return store.put("message", id, m);
+  }
+
+  private static final Set<String> APPLICATION_STATUSES =
+      Set.of(
+          "DISCOVERED",
+          "SAVED",
+          "CV_PREPARED",
+          "APPLIED",
+          "RECRUITER_CONTACTED",
+          "INTERVIEW",
+          "OFFER",
+          "REJECTED",
+          "WITHDRAWN");
+
+  @GetMapping("/applications")
+  public List<Map<String, Object>> applications() {
+    return store.list("application");
+  }
+
+  @PostMapping("/applications")
+  public Map<String, Object> application(@RequestBody Map<String, Object> input) {
+    String jobId = Input.required(input, "jobId", 100);
+    job(jobId);
+    if (store.list("application").stream().anyMatch(a -> jobId.equals(a.get("jobId"))))
+      throw new ApiError(409, "Application already tracked");
+    var a = new LinkedHashMap<String, Object>();
+    a.put("jobId", jobId);
+    a.put("status", "DISCOVERED");
+    updateApplicationFields(a, input);
+    var saved = store.create("application", a);
+    event(saved, null);
+    return saved;
+  }
+
+  @PatchMapping("/applications/{id}")
+  public Map<String, Object> application(
+      @PathVariable String id, @RequestBody Map<String, Object> input) {
+    var a = new LinkedHashMap<>(store.get("application", id));
+    String previous = Input.text(a, "status");
+    updateApplicationFields(a, input);
+    var saved = store.put("application", id, a);
+    event(saved, previous);
+    return saved;
+  }
+
+  private void updateApplicationFields(Map<String, Object> a, Map<String, Object> input) {
+    String s = Input.text(input, "status");
+    if (!s.isBlank()) {
+      if (!APPLICATION_STATUSES.contains(s)) throw new ApiError(400, "Invalid application status");
+      if (s.equals("APPLIED") && !s.equals(a.get("status")) && !Input.bool(input, "confirmApplied"))
+        throw new ApiError(400, "Confirm you personally submitted this application");
+      if (s.equals("APPLIED") && Input.bool(input, "confirmApplied")) {
+        a.put("submittedByUser", true);
+        a.put("submittedAt", Instant.now().toString());
+      }
+      a.put("status", s);
+    }
+    a.putAll(
+        Input.fields(
+            input,
+            "notes",
+            "followUpDate",
+            "interviewDate",
+            "interviewNotes",
+            "salaryExpectation",
+            "offerDetails",
+            "recruiterId"));
+    if (input.get("recruiterId") != null && !Input.text(input, "recruiterId").isBlank()) {
+      var r = store.get("recruiter", Input.text(input, "recruiterId"));
+      if (!Objects.equals(r.get("jobId"), a.get("jobId")))
+        throw new ApiError(400, "Recruiter must belong to this job");
+    }
+    a.put("updatedAt", Instant.now().toString());
+  }
+
+  private void event(Map<String, Object> a, String previous) {
+    var e = new LinkedHashMap<String, Object>();
+    e.put("applicationId", a.get("id"));
+    e.put("jobId", a.get("jobId"));
+    e.put("previousStatus", previous);
+    e.put("status", a.get("status"));
+    e.put("source", "USER_ACTION");
+    store.create("application_event", e);
+    var j = new LinkedHashMap<>(job(Input.text(a, "jobId")));
+    j.put("applicationStatus", a.get("status"));
+    store.put("job", Input.text(a, "jobId"), j);
+  }
+
+  @GetMapping("/applications/{id}/events")
+  public List<Map<String, Object>> events(@PathVariable String id) {
+    store.get("application", id);
+    return store.list("application_event").stream()
+        .filter(e -> id.equals(e.get("applicationId")))
+        .toList();
+  }
 }

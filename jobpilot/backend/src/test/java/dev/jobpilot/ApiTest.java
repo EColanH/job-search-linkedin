@@ -1,32 +1,325 @@
 package dev.jobpilot;
-import org.junit.jupiter.api.*;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.http.MediaType;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.*;
+
+import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
-import static org.junit.jupiter.api.Assertions.*;
-@SpringBootTest(properties={"spring.datasource.url=jdbc:h2:mem:jobpilot;MODE=PostgreSQL;DB_CLOSE_DELAY=-1","spring.datasource.username=sa","spring.datasource.password=","spring.jpa.hibernate.ddl-auto=create-drop","spring.flyway.enabled=false"})
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.*;
+import org.junit.jupiter.api.*;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+
+@SpringBootTest(
+    properties = {
+      "spring.datasource.url=jdbc:h2:mem:jobpilot;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
+      "spring.datasource.username=sa",
+      "spring.datasource.password=",
+      "spring.jpa.hibernate.ddl-auto=create-drop",
+      "spring.flyway.enabled=false"
+    })
 @AutoConfigureMockMvc
 class ApiTest {
- @Autowired MockMvc mvc;@Autowired Store store;@Autowired ObjectMapper json;@Autowired Api api;
- @BeforeEach void clear(){store.deleteAll();}
- Map<String,Object> body(String body)throws Exception{return json.readValue(body,Map.class);}
- Map<String,Object> imported(String url)throws Exception{return body(mvc.perform(post("/api/jobs/import").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of("url",url,"title","Customer Success","company","Synthetic Co","description","Customer communication and issue resolution.")))).andExpect(status().isOk()).andReturn().getResponse().getContentAsString());}
- @Test void deduplicatesCanonicalIdsAndPreservesSource()throws Exception{var a=imported("https://www.linkedin.com/jobs/view/customer-success-12345/?trackingId=x");var b=imported("https://pl.linkedin.com/jobs/view/12345/");assertEquals(a.get("id"),b.get("id"));assertEquals(1,store.list("job").size());assertEquals("UNKNOWN",a.get("availability"));assertNull(a.get("lastVerifiedAt"));assertTrue(a.get("originalUrl").toString().contains("trackingId"));}
- @Test void rejectsNonLinkedInAndSpoofedHosts()throws Exception{for(String url:List.of("https://linkedin.com.evil.test/jobs/view/12345","https://www.indeed.com/jobs/view/12345","https://user@linkedin.com/jobs/view/12345","http://www.linkedin.com/jobs/view/12345"))mvc.perform(post("/api/jobs/import").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of("url",url)))).andExpect(status().isBadRequest());}
- @Test void salaryIsOptionalAndUndisclosedIncluded(){var p=Defaults.preferences();var undisclosed=Map.<String,Object>of("salarySource","UNDISCLOSED");assertTrue(api.salaryMatches(undisclosed,p));p.put("salaryFilterEnabled",true);p.put("salaryMin",15000);assertTrue(api.salaryMatches(undisclosed,p));p.put("includeUndisclosedSalaries",false);assertFalse(api.salaryMatches(undisclosed,p));var low=Map.<String,Object>of("salaryMin",5000,"salaryMax",6000,"salarySource","ADVERTISED","currency","PLN","salaryPeriod","MONTHLY");assertFalse(api.salaryMatches(low,p));p.put("salaryFilterEnabled",false);assertTrue(api.salaryMatches(low,p));}
- @Test void neverFilterByEstimatedSalaryOrDifferentCurrency(){var p=Defaults.preferences();p.put("salaryFilterEnabled",true);p.put("salaryMin",15000);assertTrue(api.salaryMatches(Map.of("salaryMin",3000,"salarySource","ESTIMATED","currency","PLN","salaryPeriod","MONTHLY"),p));assertTrue(api.salaryMatches(Map.of("salaryMin",3000,"salarySource","ADVERTISED","currency","EUR","salaryPeriod","MONTHLY"),p));}
- @Test void appliedRequiresExplicitUserConfirmation()throws Exception{var job=imported("https://www.linkedin.com/jobs/view/55555/");String data=json.writeValueAsString(Map.of("jobId",job.get("id"),"status","APPLIED"));mvc.perform(post("/api/applications").contentType(MediaType.APPLICATION_JSON).content(data)).andExpect(status().isBadRequest());var app=body(mvc.perform(post("/api/applications").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of("jobId",job.get("id"),"status","APPLIED","confirmApplied",true)))).andExpect(status().isOk()).andReturn().getResponse().getContentAsString());assertEquals("APPLIED",app.get("status"));assertEquals(true,app.get("submittedByUser"));assertEquals(1,store.list("application_event").size());}
- @Test void recruiterVerifiedNeedsExplicitAssociation()throws Exception{var job=imported("https://www.linkedin.com/jobs/view/77777/");var recruiter=new HashMap<String,Object>(Map.of("name","Synthetic Recruiter","confidence","VERIFIED","evidenceUrl","https://www.linkedin.com/jobs/view/77777/"));mvc.perform(post("/api/jobs/"+job.get("id")+"/recruiters").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(recruiter))).andExpect(status().isBadRequest());recruiter.put("confirmedAssociation",true);mvc.perform(post("/api/jobs/"+job.get("id")+"/recruiters").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(recruiter))).andExpect(status().isOk());}
- @Test void cvDownloadRequiresApproval()throws Exception{var cv=store.create("cv",Map.of("status","DRAFT","documentId",UUID.randomUUID().toString()));mvc.perform(get("/api/cvs/"+cv.get("id")+"/download")).andExpect(status().isConflict());}
- @Test void blocksCrossOriginWritesAndHostRebinding()throws Exception{mvc.perform(put("/api/candidates/current").header("Origin","https://evil.test").contentType(MediaType.APPLICATION_JSON).content("{}" )).andExpect(status().isForbidden());mvc.perform(get("/api/candidates/current").with(r->{r.setServerName("evil.test");return r;})).andExpect(status().isForbidden());}
- @Test void interviewDoesNotClaimSubmitted()throws Exception{var job=imported("https://www.linkedin.com/jobs/view/88888/");mvc.perform(post("/api/applications").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of("jobId",job.get("id"),"status","INTERVIEW")))).andExpect(status().isOk());assertEquals(0L,api.dashboard().get("applicationsSubmitted"));}
- @Test void defaultsContainNoUnverifiedPersonalClaims()throws Exception{var c=api.candidate();assertEquals("",c.get("name"));assertEquals(List.of(),c.get("verifiedFacts"));assertEquals(false,api.preferences().get("salaryFilterEnabled"));assertEquals(12,Input.maps(api.preferences().get("titles")).size());}
- @Test void profileVerificationStoredSeparately()throws Exception{String profile=json.writeValueAsString(Map.of("name","Synthetic Candidate","verifiedFacts",List.of(Map.of("id","fact-1","section","Experience","text","Resolved client issues")),"pendingFacts",List.of(Map.of("id","pending-1","section","Extracted","text","Unverified claim"))));mvc.perform(put("/api/candidates/current").contentType(MediaType.APPLICATION_JSON).content(profile)).andExpect(status().isOk());assertEquals(1,Input.maps(api.candidate().get("verifiedFacts")).size());assertEquals(1,Input.maps(api.candidate().get("pendingFacts")).size());}
- @Test void schedulesStayDisabledAndExternalProviderNeedsConsent()throws Exception{mvc.perform(put("/api/search-preferences").contentType(MediaType.APPLICATION_JSON).content("{\"scheduleEnabled\":true}")).andExpect(status().isOk()).andExpect(jsonPath("$.scheduleEnabled").value(false));mvc.perform(put("/api/settings").contentType(MediaType.APPLICATION_JSON).content("{\"ai\":{\"provider\":\"OPENAI_COMPATIBLE\",\"model\":\"gpt-4o-mini\",\"externalConsent\":false}}")).andExpect(status().isBadRequest());}
+  @Autowired MockMvc mvc;
+  @Autowired Store store;
+  @Autowired ObjectMapper json;
+  @Autowired Api api;
+
+  @BeforeEach
+  void clear() {
+    store.deleteAll();
+  }
+
+  Map<String, Object> body(String body) throws Exception {
+    return json.readValue(body, Map.class);
+  }
+
+  Map<String, Object> imported(String url) throws Exception {
+    return body(
+        mvc.perform(
+                post("/api/jobs/import")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(
+                        json.writeValueAsString(
+                            Map.of(
+                                "url",
+                                url,
+                                "title",
+                                "Customer Success",
+                                "company",
+                                "Synthetic Co",
+                                "description",
+                                "Customer communication and issue resolution."))))
+            .andExpect(status().isOk())
+            .andReturn()
+            .getResponse()
+            .getContentAsString());
+  }
+
+  @Test
+  void deduplicatesCanonicalIdsAndPreservesSource() throws Exception {
+    var a = imported("https://www.linkedin.com/jobs/view/customer-success-12345/?trackingId=x");
+    var b = imported("https://pl.linkedin.com/jobs/view/12345/");
+    assertEquals(a.get("id"), b.get("id"));
+    assertEquals(1, store.list("job").size());
+    assertEquals("UNKNOWN", a.get("availability"));
+    assertNull(a.get("lastVerifiedAt"));
+    assertTrue(a.get("originalUrl").toString().contains("trackingId"));
+  }
+
+  @Test
+  void rejectsNonLinkedInAndSpoofedHosts() throws Exception {
+    for (String url :
+        List.of(
+            "https://linkedin.com.evil.test/jobs/view/12345",
+            "https://www.indeed.com/jobs/view/12345",
+            "https://user@linkedin.com/jobs/view/12345",
+            "http://www.linkedin.com/jobs/view/12345"))
+      mvc.perform(
+              post("/api/jobs/import")
+                  .contentType(MediaType.APPLICATION_JSON)
+                  .content(json.writeValueAsString(Map.of("url", url))))
+          .andExpect(status().isBadRequest());
+  }
+
+  @Test
+  void salaryIsOptionalAndUndisclosedIncluded() {
+    var p = Defaults.preferences();
+    var undisclosed = Map.<String, Object>of("salarySource", "UNDISCLOSED");
+    assertTrue(api.salaryMatches(undisclosed, p));
+    p.put("salaryFilterEnabled", true);
+    p.put("salaryMin", 15000);
+    assertTrue(api.salaryMatches(undisclosed, p));
+    p.put("includeUndisclosedSalaries", false);
+    assertFalse(api.salaryMatches(undisclosed, p));
+    var low =
+        Map.<String, Object>of(
+            "salaryMin",
+            5000,
+            "salaryMax",
+            6000,
+            "salarySource",
+            "ADVERTISED",
+            "currency",
+            "PLN",
+            "salaryPeriod",
+            "MONTHLY");
+    assertFalse(api.salaryMatches(low, p));
+    p.put("salaryFilterEnabled", false);
+    assertTrue(api.salaryMatches(low, p));
+  }
+
+  @Test
+  void neverFilterByEstimatedSalaryOrDifferentCurrency() {
+    var p = Defaults.preferences();
+    p.put("salaryFilterEnabled", true);
+    p.put("salaryMin", 15000);
+    assertTrue(
+        api.salaryMatches(
+            Map.of(
+                "salaryMin",
+                3000,
+                "salarySource",
+                "ESTIMATED",
+                "currency",
+                "PLN",
+                "salaryPeriod",
+                "MONTHLY"),
+            p));
+    assertTrue(
+        api.salaryMatches(
+            Map.of(
+                "salaryMin",
+                3000,
+                "salarySource",
+                "ADVERTISED",
+                "currency",
+                "EUR",
+                "salaryPeriod",
+                "MONTHLY"),
+            p));
+  }
+
+  @Test
+  void appliedRequiresExplicitUserConfirmation() throws Exception {
+    var job = imported("https://www.linkedin.com/jobs/view/55555/");
+    String data = json.writeValueAsString(Map.of("jobId", job.get("id"), "status", "APPLIED"));
+    mvc.perform(post("/api/applications").contentType(MediaType.APPLICATION_JSON).content(data))
+        .andExpect(status().isBadRequest());
+    var app =
+        body(
+            mvc.perform(
+                    post("/api/applications")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(
+                            json.writeValueAsString(
+                                Map.of(
+                                    "jobId",
+                                    job.get("id"),
+                                    "status",
+                                    "APPLIED",
+                                    "confirmApplied",
+                                    true))))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString());
+    assertEquals("APPLIED", app.get("status"));
+    assertEquals(true, app.get("submittedByUser"));
+    assertEquals(1, store.list("application_event").size());
+  }
+
+  @Test
+  void recruiterVerifiedNeedsExplicitAssociation() throws Exception {
+    var job = imported("https://www.linkedin.com/jobs/view/77777/");
+    var recruiter =
+        new HashMap<String, Object>(
+            Map.of(
+                "name",
+                "Synthetic Recruiter",
+                "confidence",
+                "VERIFIED",
+                "evidenceUrl",
+                "https://www.linkedin.com/jobs/view/77777/"));
+    mvc.perform(
+            post("/api/jobs/" + job.get("id") + "/recruiters")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(recruiter)))
+        .andExpect(status().isBadRequest());
+    recruiter.put("confirmedAssociation", true);
+    mvc.perform(
+            post("/api/jobs/" + job.get("id") + "/recruiters")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(recruiter)))
+        .andExpect(status().isOk());
+  }
+
+  @Test
+  void cvDownloadRequiresApproval() throws Exception {
+    var cv =
+        store.create("cv", Map.of("status", "DRAFT", "documentId", UUID.randomUUID().toString()));
+    mvc.perform(get("/api/cvs/" + cv.get("id") + "/download")).andExpect(status().isConflict());
+  }
+
+  @Test
+  void blocksCrossOriginWritesAndHostRebinding() throws Exception {
+    mvc.perform(
+            put("/api/candidates/current")
+                .header("Origin", "https://evil.test")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}"))
+        .andExpect(status().isForbidden());
+    mvc.perform(
+            get("/api/candidates/current")
+                .with(
+                    r -> {
+                      r.setServerName("evil.test");
+                      return r;
+                    }))
+        .andExpect(status().isForbidden());
+  }
+
+  @Test
+  void interviewDoesNotClaimSubmitted() throws Exception {
+    var job = imported("https://www.linkedin.com/jobs/view/88888/");
+    mvc.perform(
+            post("/api/applications")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    json.writeValueAsString(Map.of("jobId", job.get("id"), "status", "INTERVIEW"))))
+        .andExpect(status().isOk());
+    assertEquals(0L, api.dashboard().get("applicationsSubmitted"));
+  }
+
+  @Test
+  void defaultsContainNoUnverifiedPersonalClaims() throws Exception {
+    var c = api.candidate();
+    assertEquals("", c.get("name"));
+    assertEquals(List.of(), c.get("verifiedFacts"));
+    assertEquals(false, api.preferences().get("salaryFilterEnabled"));
+    assertEquals(12, Input.maps(api.preferences().get("titles")).size());
+  }
+
+  @Test
+  void profileVerificationStoredSeparately() throws Exception {
+    String profile =
+        json.writeValueAsString(
+            Map.of(
+                "name",
+                "Synthetic Candidate",
+                "verifiedFacts",
+                List.of(
+                    Map.of(
+                        "id", "fact-1", "section", "Experience", "text", "Resolved client issues")),
+                "pendingFacts",
+                List.of(
+                    Map.of(
+                        "id", "pending-1", "section", "Extracted", "text", "Unverified claim"))));
+    mvc.perform(
+            put("/api/candidates/current").contentType(MediaType.APPLICATION_JSON).content(profile))
+        .andExpect(status().isOk());
+    assertEquals(1, Input.maps(api.candidate().get("verifiedFacts")).size());
+    assertEquals(1, Input.maps(api.candidate().get("pendingFacts")).size());
+  }
+
+  @Test
+  void schedulesStayDisabledAndExternalProviderNeedsConsent() throws Exception {
+    mvc.perform(
+            put("/api/search-preferences")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"scheduleEnabled\":true}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.scheduleEnabled").value(false));
+    mvc.perform(
+            put("/api/settings")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    "{\"ai\":{\"provider\":\"OPENAI_COMPATIBLE\",\"model\":\"gpt-4o-mini\",\"externalConsent\":false}}"))
+        .andExpect(status().isBadRequest());
+  }
+
+  @Test
+  void rejectsInvalidPublicationDatesBeforePersisting() throws Exception {
+    for (String date : List.of("not-a-date", "2026-10-31garbage", "2026-13-31")) {
+      mvc.perform(
+              post("/api/jobs/import")
+                  .contentType(MediaType.APPLICATION_JSON)
+                  .content(
+                      json.writeValueAsString(
+                          Map.of(
+                              "url",
+                              "https://www.linkedin.com/jobs/view/99999/",
+                              "publishedAt",
+                              date))))
+          .andExpect(status().isBadRequest());
+    }
+    assertTrue(store.list("job").isEmpty());
+    var j = imported("https://www.linkedin.com/jobs/view/99999/");
+    mvc.perform(
+            patch("/api/jobs/" + j.get("id"))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"publishedAt\":\"bad-date\"}"))
+        .andExpect(status().isBadRequest());
+    mvc.perform(get("/api/jobs"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1));
+  }
+
+  @Test
+  void rejectsInvalidJobMetadataTypesAndArrangement() throws Exception {
+    var j = imported("https://www.linkedin.com/jobs/view/99991/");
+    mvc.perform(
+            patch("/api/jobs/" + j.get("id"))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":{\"nested\":true}}"))
+        .andExpect(status().isBadRequest());
+    mvc.perform(
+            patch("/api/jobs/" + j.get("id"))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"workArrangement\":\"UNRECOGNIZED\"}"))
+        .andExpect(status().isBadRequest());
+  }
 }
