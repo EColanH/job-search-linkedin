@@ -1,0 +1,72 @@
+name: jobpilot
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-jobpilot}
+      POSTGRES_USER: ${POSTGRES_USER:-jobpilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (scripts/setup.sh generates one)}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  document-worker:
+    build: ./document-worker
+    environment:
+      DOCUMENT_STORAGE: /data
+    volumes:
+      - documents:/data
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    restart: unless-stopped
+  backend:
+    build: ./backend
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-jobpilot}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-jobpilot}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      DOCUMENT_WORKER_URL: http://document-worker:8000
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      STORAGE_PATH: /data
+    ports:
+      - '127.0.0.1:8080:8080'
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - backend-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      document-worker:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8080/actuator/health]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+  frontend:
+    build: ./frontend
+    ports:
+      - '127.0.0.1:3000:80'
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1/]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+volumes:
+  postgres-data:
+  documents:
+  backend-data:
