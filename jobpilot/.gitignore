@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+**/node_modules/
+**/dist/
+**/target/
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/*.pyc
+**/coverage/
+**/playwright-report/
+**/test-results/
+data/
+backups/
+*.log
+.DS_Store
