@@ -81,3 +81,16 @@ Backups include private candidate data; protect/encrypt them yourself. The backu
 No automatic job discovery, recruiter scraping, freshness checking against LinkedIn, application submission, or outreach sending is enabled. Public recruiter evidence is entered by the user. LinkedIn filters not expressible in search URLs are applied locally where recorded data exists. Manual imported salary is treated as user-transcribed advertised compensation; JobPilot does not estimate salary. Unknown currencies/periods cannot be converted or ranked as comparable salaries.
 
 Generated CVs use verified facts conservatively. An AI model may select relevant existing fact IDs; it cannot introduce new factual claims. This favors auditability over unrestricted rewriting. Read the validation report for tested capabilities and remaining limitations before use.
+
+## GitHub publishing
+
+The existing remote is `EColanH/job-search-linkedin`. Before pushing, verify it is private:
+
+```sh
+# Run from the Git repository root after authenticating gh on your Mac.
+gh repo view EColanH/job-search-linkedin --json isPrivate --jq .isPrivate
+# Continue only if the result is true.
+git push -u origin main
+```
+
+In the development environment, Git read access worked but GitHub metadata requests returned `Forbidden`; repository privacy could not be verified. Commits were kept locally rather than publishing to a repository of unknown visibility. No duplicate GitHub repository was created.
