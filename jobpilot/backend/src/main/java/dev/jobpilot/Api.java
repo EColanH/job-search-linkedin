@@ -92,11 +92,14 @@ public class Api {
 
   @GetMapping("/candidates/documents/{id}/download")
   public ResponseEntity<byte[]> original(@PathVariable String id) {
-    boolean owned =
+    var document =
         Input.maps(candidate().get("documents")).stream()
-            .anyMatch(d -> id.equals(d.get("documentId")));
-    if (!owned) throw new ApiError(404, "Document not found");
-    return attachment(worker.download(id, "original"), "application/octet-stream", "original-cv");
+            .filter(d -> id.equals(d.get("documentId")))
+            .findFirst()
+            .orElseThrow(() -> new ApiError(404, "Document not found"));
+    String filename = Input.text(document, "originalName").replaceAll("[^a-zA-Z0-9._-]", "_");
+    if (filename.isBlank()) filename = "original-cv";
+    return attachment(worker.download(id, "original"), "application/octet-stream", filename);
   }
 
   @DeleteMapping("/candidates/current")
